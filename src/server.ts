@@ -1,5 +1,5 @@
 import express from "express";
-import { z } from "zod";
+import { date, z } from "zod";
 import dotenv from "dotenv";
 import { classifications, transaction } from "./data.js";
 
@@ -61,11 +61,58 @@ const classificationSchema = z.object({
 
 const classificationsSchema = z.array(classificationSchema);
 
+// Date schema
+
+const dateSchema = z.iso.date();
+const dateRangeSchema = z
+  .object({
+    fromDate: dateSchema.optional(),
+    toDate: dateSchema.optional(),
+  })
+  .refine(
+    (data) => {
+      if (!data.fromDate || !data.toDate) return true; // when missing date: nothing to compare
+
+      if (!dateSchema.safeParse(data.fromDate).success) return true; // invalid fromDate: already reported
+      if (!dateSchema.safeParse(data.toDate).success) return true; // same as fromdate, toDate already reported
+
+      return data.fromDate <= data.toDate;
+    },
+    {
+      message: "fromDate cannot be later than toDate",
+      path: ["fromDate"],
+    },
+  );
 // Get all transactions
+// 3. Date Filtering
 
 app.get("/transactions", (req, res) => {
   try {
-    const result = transactionsSchema.safeParse(transactions);
+    let transactionResults;
+    //  create Query Parameters for date filtering
+    const dates = dateRangeSchema.safeParse({
+      fromDate: req.query.fromDate,
+      toDate: req.query.toDate,
+    });
+
+    if (dates.success) {
+      const { fromDate, toDate } = dates.data;
+      if (fromDate || toDate) {
+        transactionResults = transactions.filter((transaction) => {
+          if (fromDate && transaction.date < fromDate) return false; // before start: remove
+          if (toDate && transaction.date > toDate) return false; // after end: remove
+          return true; // otherwise keep
+        });
+      } else {
+        transactionResults = transactions;
+      }
+    } else {
+      return res.status(400).json({
+        error: dates.error.issues.map((issue) => issue.message).join("; "),
+      });
+    }
+
+    const result = transactionsSchema.safeParse(transactionResults);
 
     if (!result.success) {
       return res.status(400).json({
@@ -79,9 +126,15 @@ app.get("/transactions", (req, res) => {
       translations: result.data.map((tra) => addClassification(tra)),
     });
   } catch (error: unknown) {
-    return res.status(500).json({
-      message: "Something went wrong with get all transtions",
-    });
+    if (error instanceof z.ZodError) {
+      return res.status(400).json({
+        message: "Invalid request",
+      });
+    } else {
+      return res.status(500).json({
+        message: "Something went wrong with get all transtions",
+      });
+    }
   }
 });
 
